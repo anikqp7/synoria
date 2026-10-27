@@ -1,0 +1,36 @@
+"use client";
+import { Form, Input, Select } from '@/components/validatedForm';
+import Link from 'next/link';
+import { useEffect, useState } from 'react';
+import Button from '@/components/button';
+import DefenceScheduleForm from '@/components/defenceScheduleForm';
+import { dateFor } from '@/lib/monitoringFormat';
+export default function DefenceManager({ role, resultsOnly = false }) {
+  const [data, setData] = useState(null), [error, setError] = useState(''), [loading, setLoading] = useState(true), [tick, setTick] = useState(0), [query, setQuery] = useState(resultsOnly ? 'status=published' : ''), [open, setOpen] = useState(false);
+  const [filters, setFilters] = useState({ search: '', status: resultsOnly ? 'published' : '' });
+  useEffect(() => {
+    let current = true, running = false; const controller = new AbortController();
+    async function load() {
+      if (running) return; running = true;
+      try { const response = await fetch(`/api/defences?${query}`, { cache: 'no-store', signal: controller.signal }); const result = await response.json(); if (!response.ok) throw new Error(result.message || 'Unable to load schedules.'); if (current) { setData(result); setError(''); } }
+      catch (err) { if (current && err.name !== 'AbortError') setError(err.message); }
+      finally { running = false; if (current) setLoading(false); }
+    }
+    load(); const refresh = () => { if (document.visibilityState === 'visible') load(); };
+    const timer = setInterval(refresh, 30000); window.addEventListener('focus', refresh);
+    return () => { current = false; controller.abort(); clearInterval(timer); window.removeEventListener('focus', refresh); };
+  }, [query, tick]);
+  function apply(event) { event.preventDefault(); setLoading(true); setQuery(new URLSearchParams(Object.entries(filters).filter(([, value]) => value)).toString()); setTick(value => value + 1); }
+  function page(value) { const params = new URLSearchParams(query); params.set('page', String(value)); setLoading(true); setQuery(params.toString()); }
+  return <div className="space-y-6"><div className="flex flex-wrap items-center justify-between gap-3"><p className="m-0 text-sm text-text-secondary">{resultsOnly ? 'View published defence results and the submitted board evaluations.' : role === 'department' ? 'Schedule approved proposals and assign the evaluation board.' : role === 'examiner' ? 'View your assigned defences and their approved proposals.' : 'View your project defence dates and board members.'}</p><div className="flex gap-3"><Button appearance="outline" size="small" disabled={loading} onClick={() => { setLoading(true); setTick(value => value + 1); }}>Refresh</Button>{role === 'department' && !resultsOnly && <Button size="small" disabled={!data?.projects.length || !data?.examiners.length} onClick={() => setOpen({ projects: data.projects, examiners: data.examiners })}>Schedule Defence</Button>}</div></div>
+    {error && <p role="alert" className="rounded-control border border-danger-border bg-danger-soft p-4 text-sm text-danger">{error}{data && ' Showing the last successful snapshot.'}</p>}{loading && !data && <p role="status">Loading Defence Schedules…</p>}
+    {data && <><div className="grid grid-cols-2 gap-3 sm:grid-cols-4">{[['Scheduled', data.summary.scheduled], ['Upcoming', data.summary.upcoming], ['Published', data.summary.published || 0], ['Cancelled', data.summary.cancelled]].map(([title, count]) => <div key={title} className="rounded-panel border border-border bg-surface p-4 sm:p-5"><p className="m-0 text-sm text-text-secondary">{title}</p><p className="mb-0 mt-2 text-2xl font-semibold">{count}</p></div>)}</div>
+      {role === 'department' && !resultsOnly && (!data.projects.length || !data.examiners.length) && <p className="text-sm text-text-secondary">{!data.projects.length ? 'A project needs an approved proposal and no active defence schedule before it can be scheduled.' : 'Create or activate an Examiner account to assign the board.'}</p>}
+      <section className="rounded-panel border border-border bg-surface p-5 sm:p-6"><Form onSubmit={apply} className="grid items-end gap-4 sm:grid-cols-[1fr_180px_auto]"><label className="m-0 grid gap-2 text-sm">Search<Input type="search" maxLength={200} placeholder="Project, title, venue or examiner" value={filters.search} onChange={event => setFilters({ ...filters, search: event.target.value })} /></label><label className="m-0 grid gap-2 text-sm">Status<Select value={filters.status} onChange={event => setFilters({ ...filters, status: event.target.value })}><option value="">All</option><option value="scheduled">Scheduled</option><option value="cancelled">Cancelled</option><option value="published">Published</option></Select></label><Button type="submit" className="!h-[42px] !py-0">Apply Filters</Button></Form>
+        <p className="text-sm text-text-secondary" role="status">{loading ? 'Updating…' : `${data.total} matching defence(s). Times use Asia/Dhaka.`}</p><div className="divide-y divide-border">{data.schedules.map(item => <article key={item.id} className="py-5"><div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><Link href={`/${role}/defences/${item.id}`} className="text-lg font-semibold text-primary [overflow-wrap:anywhere]">{item.workspaceName}</Link><p className="mb-0 mt-1 text-sm text-text-secondary [overflow-wrap:anywhere]">{item.title}</p></div><span className={`rounded-control px-3 py-1.5 text-sm ${item.status === 'cancelled' ? 'bg-danger-soft text-danger' : 'bg-primary-soft text-primary'}`}>{item.status === 'published' ? 'Result Published' : item.status === 'cancelled' ? 'Cancelled' : 'Scheduled'}</span></div><p className="my-3 text-sm font-medium">{dateFor(item.startsAt)} → {dateFor(item.endsAt)} · {item.durationMinutes} Minutes</p><p className="my-2 text-sm text-text-secondary">Venue: {item.venue || 'Online Meeting'} · Proposal Version {item.proposalVersion}</p>{item.result && <p className="my-3 text-xl font-semibold text-primary">{item.result.weightedTotal.toFixed(2)} / 100</p>}<p className="mb-0 mt-2 text-sm text-text-secondary">Board: {item.board.map(member => member.name).join(', ')}</p></article>)}</div>{!data.schedules.length && <p className="text-sm text-text-secondary">No defence schedules match these filters.</p>}
+        <div className="mt-4 flex items-center justify-between gap-3"><Button appearance="outline" size="small" disabled={loading || data.page <= 1} onClick={() => page(data.page - 1)}>Previous</Button><span className="text-sm text-text-secondary">Page {data.page} Of {Math.max(1, Math.ceil(data.total / data.pageSize))}</span><Button appearance="outline" size="small" disabled={loading || data.page * data.pageSize >= data.total} onClick={() => page(data.page + 1)}>Next</Button></div>
+      </section><p className="text-sm text-text-secondary">{resultsOnly ? "Open a published defence to view the result, rubric and board feedback." : `${data.conflictScope} Schedule changes are saved in history.`} This page updates every 30 seconds while visible.</p>
+    </>}
+    {open && <DefenceScheduleForm projects={open.projects} examiners={open.examiners} onClose={() => setOpen(false)} onSaved={async () => { setLoading(true); setTick(value => value + 1); }} />}
+  </div>;
+}

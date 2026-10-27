@@ -1,0 +1,117 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const { once } = require('node:events');
+const { randomBytes } = require('node:crypto');
+require('dotenv').config({ path: require('node:path').join(__dirname, '../.env'), quiet: true });
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+
+test('proposal revision cycles, immutable approved scope and assigned-only atomic review', { timeout: 60000 }, async () => {
+  process.env.SESSION_SECRET = randomBytes(48).toString('hex');
+  let app, server;
+  try {
+    await mongoose.connect(process.env.MONGODB_URI, { dbName: `synoria_review_${randomBytes(8).toString('hex')}`, serverSelectionTimeoutMS: 5000 });
+    const Department = require('../src/models/department');
+    const Student = require('../src/models/student');
+    const Workspace = require('../src/models/workspace');
+    const Supervisor = require('../src/models/supervisor');
+    const Ledger = require('../src/models/supervisionLedger');
+    const Examiner = require('../src/models/examiner');
+    await Promise.all([Department, Student, Workspace, Supervisor, Ledger, Examiner].map(Model => Model.init()));
+    const password = 'assignment-password-123', passwordHash = await bcrypt.hash(password, 12);
+    const departments = await Department.create(['CSE', 'EEE'].map(name => ({ proposalPeriod: { status: 'open', deadline: new Date(Date.now()+86400000) }, name, university: 'Test University', email: `${name}@example.edu`, passwordHash })));
+    const students = await Student.create(Array.from({ length: 7 }, (_, i) => ({ department: departments[i === 6 ? 1 : 0]._id, name: `Student ${i}`, email: `student${i}@example.edu`, phone: '+8801712345678', studentId: `ID-${i}`, passwordHash })));
+    const supervisors = await Supervisor.create(Array.from({ length: 4 }, (_, i) => ({ department: departments[i === 3 ? 1 : 0]._id, name: `Supervisor ${i}`, email: `supervisor${i}@example.edu`, phone: '+8801712345678', passwordHash })));
+    const examiner = await Examiner.create({ department: departments[0]._id, name: 'Examiner', email: 'examiner@example.edu', phone: '+8801712345678', passwordHash });
+    const workspaces = await Workspace.create(students.map((student, i) => ({ name: `Team ${i}`, workType: 'project', department: student.department, leader: student._id, members: [student._id], status: i === 5 ? 'draft' : 'submitted', proposalVersions: i === 5 ? [] : [{ version: 1, title: `Proposal ${i}`, abstract: 'Test abstract', researchArea: 'Software', supervisorPreference: { id: supervisors[0]._id, name: supervisors[0].name }, members: [{ id: student._id, name: student.name, studentId: student.studentId }], submittedBy: student._id, submittedAt: new Date() }] })));
+    app = require('../src'); server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
+    const base = `http://127.0.0.1:${server.address().port}/api/auth`;
+    const request = (path, body, cookie, method) => fetch(`${base}/${path}`, { method: method || (body ? 'POST' : 'GET'), headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) }, body: body ? JSON.stringify(body) : undefined });
+    const login = async (account, role) => { const response = await request('login', { email: account.email, password, role }); assert.equal(response.status, 200); return response.headers.get('set-cookie').split(';')[0]; };
+    const admin = await login(departments[0], 'department'), other = await login(departments[1], 'department');
+    const studentCookie = await login(students[0], 'student'), examinerCookie = await login(examiner, 'examiner');
+    const supervisorCookies = []; for (const account of supervisors) supervisorCookies.push(await login(account, 'supervisor'));
+    const assignmentPath = i => `proposals/${workspaces[i].id}/assignment`;
+    const capacity = (i, maxLoad, cookie = admin) => request(`supervisorLoads/${supervisors[i].id}`, { maxLoad }, cookie, 'PATCH');
+    const assign = (i, target, previous = null, cookie = admin) => request(assignmentPath(i), { supervisorId: target === null ? null : supervisors[target].id, expectedSupervisorId: previous === null ? null : supervisors[previous].id, reason: 'Coordinator allocation' }, cookie, 'PUT');
+    const loads = async () => (await (await request('supervisorLoads', null, admin)).json()).supervisors;
+    const proposalPath = i => `workspaces/${workspaces[i].id}/proposal`;
+    const get = async i => (await (await request(proposalPath(i), null, i === 0 ? studentCookie : studentCookies[i])).json()).proposal;
+    const studentCookies = [studentCookie]; for (let i = 1; i < 3; i++) studentCookies.push(await login(students[i], 'student'));
+    const review = (i, version, decision, cookie = supervisorCookies[0], comment = 'Review instructions') => request(`supervision/${workspaces[i].id}/review`, { version, decision, comment }, cookie);
+    const save = (i, proposal, title) => request(proposalPath(i), { revision: proposal.revision, title, abstract: 'Revised abstract', researchArea: 'Software', supervisorPreference: supervisors[0].id }, studentCookies[i], 'PATCH');
+    const submit = (i, revision) => request(`${proposalPath(i)}/submit`, { revision }, studentCookies[i]);
+    assert.equal((await review(0, 1, 'approved', null)).status, 401);
+    for (const cookie of [admin, studentCookie, examinerCookie]) assert.equal((await review(0, 1, 'approved', cookie)).status, 403);
+    assert.equal((await assign(0, 0)).status, 200);
+    assert.equal((await review(0, 1, 'approved', supervisorCookies[1])).status, 404);
+    assert.equal((await review(6, 1, 'approved')).status, 404);
+    assert.equal((await review(0, 2, 'approved')).status, 409);
+    assert.equal((await review(0, 1, 'invalid')).status, 400);
+    assert.equal((await review(0, 1, 'revisionRequested', supervisorCookies[0], ' ')).status, 400);
+    assert.equal((await review(0, 1, 'rejected', supervisorCookies[0], 'x'.repeat(2001))).status, 400);
+    const original = (await get(0)).versions[0];
+    assert.equal((await review(0, 1, 'revisionRequested')).status, 200);
+    assert.equal((await review(0, 1, 'approved')).status, 409);
+    let proposal = await get(0);
+    assert.equal(proposal.canEdit, true); assert.equal(proposal.proposalStatus, 'revisionRequested');
+    assert.equal(proposal.reviews.length, 1); assert.equal(proposal.reviews[0].version, 1);
+    const saved = await save(0, proposal, 'Version Two Title'); assert.equal(saved.status, 200);
+    const nextRevision = (await saved.json()).revision;
+    const submitRace = await Promise.all([submit(0, nextRevision), submit(0, nextRevision)]);
+    assert.deepEqual(submitRace.map(item => item.status).sort(), [200, 409]);
+    proposal = await get(0); assert.equal(proposal.versions.length, 2); assert.equal(proposal.submission.version, 2); assert.equal(proposal.canEdit, false);
+    assert.deepEqual(proposal.versions[0], original);
+    assert.equal((await review(0, 1, 'approved')).status, 409);
+    const approvalRace = await Promise.all([review(0, 2, 'approved'), review(0, 2, 'revisionRequested')]);
+    assert.deepEqual(approvalRace.map(item => item.status).sort(), [200, 409]);
+    proposal = await get(0);
+    if (proposal.proposalStatus === 'revisionRequested') {
+      const draft = await save(0, proposal, 'Version Three Title'); assert.equal(draft.status, 200);
+      assert.equal((await submit(0, (await draft.json()).revision)).status, 200);
+      proposal = await get(0); assert.equal((await review(0, proposal.submission.version, 'approved')).status, 200);
+    }
+    proposal = await get(0);
+    assert.equal(proposal.status, 'active'); assert.equal(proposal.proposalStatus, 'approved'); assert.equal(proposal.canEdit, false);
+    assert.equal((await Workspace.findById(workspaces[0].id)).status, 'active');
+    const approvedScope = proposal.approvedScope;
+    assert.equal(approvedScope.submission.title, proposal.submission.title);
+    assert.equal((await save(0, proposal, 'Unauthorized approved edit')).status, 409);
+    // New scope versions do not replace the currently approved scope until approved.
+    const scopePath = `${proposalPath(0)}/scopeChange`;
+    assert.equal((await request(scopePath, { revision: proposal.revision, reason: '' }, studentCookie)).status, 400);
+    const scopeRace = await Promise.all([request(scopePath, { revision: proposal.revision, reason: 'Extend scope' }, studentCookie), request(scopePath, { revision: proposal.revision, reason: 'Concurrent scope change' }, studentCookie)]);
+    assert.deepEqual(scopeRace.map(item => item.status).sort(), [200, 409]);
+    proposal = await get(0); assert.equal(proposal.canRevise, true); assert.equal(proposal.canEdit, true);
+    const changedDraft = await save(0, proposal, 'Changed Scope Title'); assert.equal(changedDraft.status, 200);
+    assert.equal((await submit(0, (await changedDraft.json()).revision)).status, 200);
+    proposal = await get(0); assert.equal(proposal.proposalStatus, 'submitted'); assert.equal(proposal.status, 'active');
+    assert.deepEqual(proposal.approvedScope, approvedScope);
+    assert.equal((await review(0, proposal.submission.version, 'approved')).status, 200);
+    proposal = await get(0); assert.equal(proposal.approvedScope.submission.title, 'Changed Scope Title');
+    assert.ok(proposal.reviews.some(item => item.version === approvedScope.submission.version && item.approvedScope.title === approvedScope.submission.title));
+    assert.deepEqual(proposal.versions[0], original);
+    // Rejection is final for that version; only a revision request opens editing.
+    assert.equal((await assign(1, 0)).status, 200);
+    assert.equal((await review(1, 1, 'rejected')).status, 200);
+    const rejected = await get(1); assert.equal(rejected.proposalStatus, 'rejected'); assert.equal(rejected.canEdit, false);
+    assert.equal((await save(1, rejected, 'Cannot edit')).status, 409);
+    assert.equal((await submit(1, rejected.revision)).status, 409);
+    // Reassignment and a review share the same atomic permission boundary.
+    assert.equal((await assign(2, 0)).status, 200);
+    const permissionRace = await Promise.all([assign(2, 1, 0), review(2, 1, 'revisionRequested')]);
+    assert.equal(permissionRace[0].status, 200); assert.ok([200, 404].includes(permissionRace[1].status));
+    assert.equal((await review(2, 1, 'approved')).status, 404);
+    const read = (await (await request(`supervision/${workspaces[2].id}`, null, supervisorCookies[1])).json()).proposal;
+    assert.equal(read.reviews.length, permissionRace[1].status === 200 ? 1 : 0);
+    assert.equal((await request(`proposals/${workspaces[0].id}`, null, other)).status, 404);
+    const coordinatorView = (await (await request(`proposals/${workspaces[0].id}`, null, admin)).json()).proposal;
+    assert.equal(coordinatorView.approvedScope.submission.title, 'Changed Scope Title');
+    assert.equal(coordinatorView.draft, undefined);
+  } finally {
+    if (server) await new Promise(resolve => server.close(resolve));
+    if (mongoose.connection.readyState === 1) await mongoose.connection.dropDatabase();
+    if (app?.locals.sessionStore) await app.locals.sessionStore.close();
+    await mongoose.disconnect();
+  }
+});

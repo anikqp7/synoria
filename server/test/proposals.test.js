@@ -1,0 +1,108 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const { once } = require('node:events');
+const { randomBytes } = require('node:crypto');
+require('dotenv').config({ path: require('node:path').join(__dirname, '../.env'), quiet: true });
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+
+test('proposal drafts, submission locking, snapshots and coordinator privacy', { timeout: 60000 }, async () => {
+  process.env.SESSION_SECRET = randomBytes(48).toString('hex');
+  let app, server;
+  try {
+    await mongoose.connect(process.env.MONGODB_URI, { dbName: `synoria_proposals_${randomBytes(8).toString('hex')}`, serverSelectionTimeoutMS: 5000 });
+    const Department = require('../src/models/department');
+    const Student = require('../src/models/student');
+    const Workspace = require('../src/models/workspace');
+    const Supervisor = require('../src/models/supervisor');
+    const Examiner = require('../src/models/examiner');
+    await Promise.all([Department, Student, Workspace, Supervisor, Examiner].map(Model => Model.init()));
+    const password = 'proposal-password-123', passwordHash = await bcrypt.hash(password, 12);
+    const departments = await Department.create(['CSE', 'EEE'].map(name => ({ proposalPeriod: { status: 'open', deadline: new Date(Date.now()+86400000) }, name, university: 'Test University', email: `${name}@example.edu`, passwordHash })));
+    const students = await Student.create(Array.from({ length: 4 }, (_, i) => ({ department: departments[i === 3 ? 1 : 0]._id, name: `Student ${i}`, email: `student${i}@example.edu`, phone: '+8801712345678', studentId: `ID-${i}`, passwordHash })));
+    const supervisors = await Supervisor.create([0, 1].map(i => ({ department: departments[i]._id, name: `Supervisor ${i}`, email: `supervisor${i}@example.edu`, phone: '+8801712345678', passwordHash })));
+    const examiner = await Examiner.create({ department: departments[0]._id, name: 'Examiner', email: 'examiner@example.edu', phone: '+8801712345678', passwordHash });
+    app = require('../src'); server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
+    const base = `http://127.0.0.1:${server.address().port}/api/auth`;
+    const request = (path, body, cookie, method) => fetch(`${base}/${path}`, { method: method || (body ? 'POST' : 'GET'), headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) }, body: body ? JSON.stringify(body) : undefined });
+    const login = async (account, role) => { const response = await request('login', { email: account.email, password, role }); assert.equal(response.status, 200); return response.headers.get('set-cookie').split(';')[0]; };
+    const cookies = []; for (const student of students) cookies.push(await login(student, 'student'));
+    const admin = await login(departments[0], 'department'), other = await login(departments[1], 'department');
+    const supervisorCookie = await login(supervisors[0], 'supervisor'), examinerCookie = await login(examiner, 'examiner');
+    const workspace = await Workspace.create({ name: 'Legacy Team', workType: 'thesis', department: departments[0]._id, leader: students[0]._id, members: [students[0]._id, students[1]._id] });
+    // Workspaces created before Step 3 have no proposal fields in MongoDB.
+    await Workspace.collection.updateOne({ _id: workspace._id }, { $unset: { proposalRevision: '', proposalDraft: '', proposalVersions: '' } });
+    const path = `workspaces/${workspace.id}/proposal`;
+    const get = async () => (await (await request(path, null, cookies[0])).json()).proposal;
+    const save = (data, revision, cookie = cookies[0]) => request(path, { ...data, revision }, cookie, 'PATCH');
+    const submit = revision => request(`${path}/submit`, { revision }, cookies[0]);
+    assert.equal((await request(path)).status, 401);
+    assert.equal((await request(path, null, cookies[2])).status, 404);
+    assert.equal((await request(path, null, cookies[3])).status, 404);
+    for (const cookie of [admin, supervisorCookie, examinerCookie]) assert.equal((await request(path, null, cookie)).status, 403);
+    for (const cookie of [cookies[0], supervisorCookie, examinerCookie]) assert.equal((await request('proposals', null, cookie)).status, 403);
+    const initial = await get(); assert.equal(initial.revision, 0); assert.equal(initial.members.length, 2); assert.equal(initial.supervisors.length, 1);
+    assert.equal(initial.supervisors[0].passwordHash, undefined);
+    const partial = { title: 'First Draft', abstract: '', researchArea: '', supervisorPreference: '' };
+    assert.equal((await save(partial, 0, cookies[1])).status, 403);
+    assert.equal((await request(`${path}/submit`, { revision: 0 }, cookies[1])).status, 403);
+    assert.equal((await save(partial, 0)).status, 200);
+    assert.equal((await get()).draft.title, partial.title);
+    assert.equal((await submit(1)).status, 400);
+    assert.equal((await (await request('proposals', null, admin)).json()).proposals.length, 0);
+    assert.equal((await request(`proposals/${workspace.id}`, null, admin)).status, 404);
+    assert.equal((await save(partial, 0)).status, 409);
+    assert.equal((await save({ ...partial, title: { $ne: null } }, 1)).status, 400);
+    assert.equal((await save({ ...partial, abstract: 'x'.repeat(4001) }, 1)).status, 400);
+    assert.equal((await save({ ...partial, supervisorPreference: supervisors[1].id }, 1)).status, 400);
+    const complete = { title: 'বাংলা ভাষার গবেষণা', abstract: 'ক'.repeat(4000), researchArea: 'Natural Language Processing', supervisorPreference: supervisors[0].id };
+    const saveRace = await Promise.all([save(complete, 1), save({ ...complete, title: 'Other tab' }, 1)]);
+    assert.deepEqual(saveRace.map(result => result.status).sort(), [200, 409]);
+    assert.equal((await save(complete, 2)).status, 200);
+    let current = await get(); assert.equal(current.revision, 3);
+    const memberRead = (await (await request(path, null, cookies[1])).json()).proposal;
+    assert.equal(memberRead.canEdit, false); assert.equal(memberRead.draft.title, complete.title);
+    await Supervisor.updateOne({ _id: supervisors[0]._id }, { $set: { isActive: false } });
+    assert.equal((await submit(3)).status, 400);
+    await Supervisor.updateOne({ _id: supervisors[0]._id }, { $set: { isActive: true } });
+    await Student.updateOne({ _id: students[1]._id }, { $set: { isActive: false } });
+    assert.equal((await submit(3)).status, 409);
+    await Student.updateOne({ _id: students[1]._id }, { $set: { isActive: true } });
+    const invited = await request(`workspaces/${workspace.id}/invitations`, { email: students[2].email }, cookies[0]);
+    assert.equal(invited.status, 201);
+    const invite = (await invited.json()).workspace.invitations[0];
+    assert.equal((await submit(3)).status, 409);
+    assert.equal((await request(`workspaces/${workspace.id}/invitations/${invite.id}`, { action: 'cancel' }, cookies[0], 'PATCH')).status, 200);
+    // A final save and submit racing cannot silently overwrite the submitted text.
+    const finalRace = await Promise.all([save({ ...complete, title: 'Final Saved Title' }, 3), submit(3)]);
+    assert.equal(finalRace.filter(result => result.status === 200).length, 1);
+    assert.equal(finalRace.filter(result => result.status === 409).length, 1);
+    current = await get();
+    if (!current.submission) {
+      const submitRace = await Promise.all([submit(current.revision), submit(current.revision)]);
+      assert.deepEqual(submitRace.map(result => result.status).sort(), [200, 409]);
+      current = await get();
+    }
+    assert.equal(current.status, 'submitted'); assert.equal(current.canEdit, false);
+    assert.equal(current.submission.members.length, 2); assert.equal(current.submission.version, 1);
+    assert.equal((await Workspace.findById(workspace.id)).proposalVersions.length, 1);
+    assert.equal((await save(complete, current.revision)).status, 409);
+    assert.equal((await submit(current.revision)).status, 409);
+    assert.equal((await request(`workspaces/${workspace.id}`, { name: 'Changed', workType: 'project' }, cookies[0], 'PATCH')).status, 409);
+    assert.equal((await request(`workspaces/${workspace.id}/members/${students[1].id}`, {}, cookies[1], 'DELETE')).status, 200);
+    const list = (await (await request('proposals', null, admin)).json()).proposals;
+    assert.equal(list.length, 1); assert.equal(list[0].memberCount, 2);
+    assert.equal((await request(`proposals/${workspace.id}`, null, other)).status, 404);
+    assert.equal((await (await request('proposals', null, other)).json()).proposals.length, 0);
+    const snapshot = (await (await request(`proposals/${workspace.id}`, null, admin)).json()).proposal.submission;
+    await Student.updateOne({ _id: students[1]._id }, { $set: { name: 'Renamed Student' } });
+    await Supervisor.updateOne({ _id: supervisors[0]._id }, { $set: { name: 'Renamed Supervisor' } });
+    assert.deepEqual((await (await request(`proposals/${workspace.id}`, null, admin)).json()).proposal.submission, snapshot);
+    assert.equal((await request(path, null, cookies[2])).status, 404);
+  } finally {
+    if (server) await new Promise(resolve => server.close(resolve));
+    if (mongoose.connection.readyState === 1) await mongoose.connection.dropDatabase();
+    if (app?.locals.sessionStore) await app.locals.sessionStore.close();
+    await mongoose.disconnect();
+  }
+});

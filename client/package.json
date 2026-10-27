@@ -1,0 +1,31 @@
+{
+  "name": "client",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --webpack",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "test:auth": "node --test test/auth.test.mjs",
+    "test:browser": "node --test test/browser.test.mjs",
+    "test:validation": "node --test test/fieldValidation.test.mjs"
+  },
+  "dependencies": {
+    "formik": "^2.4.9",
+    "next": "16.4.2",
+    "next-auth": "^4.24.15",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "sweetalert2": "^11.26.25",
+    "yup": "^1.7.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@tailwindcss/postcss": "^4.3.3",
+    "eslint": "^9",
+    "eslint-config-next": "16.4.2",
+    "postcss": "^8.5.31",
+    "tailwindcss": "^4"
+  }
+}

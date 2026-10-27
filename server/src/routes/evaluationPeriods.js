@@ -1,0 +1,2 @@
+const validateRequest = require('../middleware/validateRequest');
+module.exports=kind=>{const router=require('express').Router(),service=require('../services/evaluationPeriodService');router.use(require('../middleware/requireDefenceUser'));for(const [method,action] of [['get','read'],['put','save']])router[method]('/',validateRequest,async(req,res)=>{try{res.set('Cache-Control','private, no-store');res.json(await service[action](req,kind));}catch(error){if(error.status)return res.status(error.status).json({message:error.message});throw error;}});return router;};

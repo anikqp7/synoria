@@ -1,0 +1,3 @@
+export const statusLabels = { draft: 'Draft', submitted: 'Submitted', active: 'Active', defenceScheduled: 'Defence Scheduled', evaluated: 'Evaluated', archived: 'Completed', approved: 'Approved', rejected: 'Rejected', revisionRequested: 'Revision Requested', pending: 'Pending', inProgress: 'In Progress', completed: 'Completed', project: 'Project', thesis: 'Thesis', research: 'Research' };
+export const labelFor = value => statusLabels[value] || value;
+export const dateFor = value => value ? new Date(value).toLocaleString('en-GB', { timeZone: 'Asia/Dhaka', dateStyle: 'medium', timeStyle: 'short' }) : 'Not Set';

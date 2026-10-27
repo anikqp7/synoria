@@ -1,0 +1,18 @@
+const validateRequest = require('../middleware/validateRequest');
+const router = require('express').Router();
+const controller = require('../controllers/defenceController');
+router.use(require('../middleware/requireDefenceUser'));
+router.get('/', validateRequest, controller.list);
+router.post('/', validateRequest, controller.create);
+const evaluation = require('../controllers/evaluationController');
+router.get('/:id/evaluation', validateRequest, evaluation.read);
+router.put('/:id/evaluation/rubric', validateRequest, evaluation.assign);
+router.put('/:id/evaluation/draft', validateRequest, evaluation.save);
+router.post('/:id/evaluation/submit', validateRequest, evaluation.submit);
+router.post('/:id/evaluation/reopen', validateRequest, evaluation.reopen);
+router.post('/:id/evaluation/publish', validateRequest, evaluation.publish);
+router.post('/:id/evaluation/correct', validateRequest, evaluation.correct);
+router.get('/:id', validateRequest, controller.detail);
+router.patch('/:id', validateRequest, controller.update);
+router.post('/:id/cancel', validateRequest, controller.cancel);
+module.exports = router;

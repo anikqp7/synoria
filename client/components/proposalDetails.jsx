@@ -1,0 +1,15 @@
+const typeLabels = { project: 'Project', thesis: 'Thesis', research: 'Research' };
+export function proposalDate(value) {
+  return value ? new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Dhaka' }).format(new Date(value)) : 'Not submitted';
+}
+export default function ProposalDetails({ proposal, draft = false }) {
+  const content = draft ? { ...proposal.draft, members: proposal.members, supervisorPreference: proposal.selectedSupervisor } : proposal.submission;
+  if (!content) return <p className="text-sm text-text-muted">No proposal has been submitted yet.</p>;
+  return <div className="space-y-6">
+    <section className="rounded-panel border border-border bg-surface p-6 shadow-panel"><p className="mt-0 text-sm font-semibold text-primary">{typeLabels[proposal.workType]} · {draft ? 'Draft' : `Submitted · Version ${content.version}`}</p><h2 className="m-0 text-2xl font-semibold [overflow-wrap:anywhere]">{content.title || 'Untitled Proposal'}</h2><p className="mt-3 text-sm text-text-secondary">{proposal.workspaceName}</p>{!draft && <p className="mb-0 text-sm text-text-muted">Submitted {proposalDate(content.submittedAt)}</p>}</section>
+    <section className="rounded-panel border border-border bg-surface p-6 shadow-panel"><h2 className="mt-0 text-lg font-semibold">Abstract</h2><p className="mb-6 whitespace-pre-wrap text-sm leading-relaxed [overflow-wrap:anywhere]">{content.abstract || 'No abstract saved yet.'}</p><h3 className="text-sm font-semibold">Research Area</h3><p className="mb-0 text-sm text-text-secondary [overflow-wrap:anywhere]">{content.researchArea || 'Not selected'}</p></section>
+    <section className="rounded-panel border border-border bg-surface p-6 shadow-panel"><h2 className="mt-0 text-lg font-semibold">Assigned Supervisor</h2><p className="mb-0 text-sm text-text-secondary">{proposal.assignment?.supervisor?.name || "Not assigned yet"}{proposal.assignment?.supervisor && !proposal.assignment.supervisor.isActive ? " · Inactive Account" : ""}</p></section>
+    <section className="rounded-panel border border-border bg-surface p-6 shadow-panel"><h2 className="mt-0 text-lg font-semibold">Supervisor Preference</h2><p className="text-sm font-semibold">{content.supervisorPreference?.name || 'Not selected'}</p>{content.supervisorPreference?.designation && <p className="text-sm text-text-secondary">{content.supervisorPreference.designation}</p>}<p className="mb-0 text-sm text-text-muted">The coordinator will make the supervisor assignment.</p></section>
+    <section className="rounded-panel border border-border bg-surface p-6 shadow-panel"><h2 className="mt-0 text-lg font-semibold">Team Members</h2><ul className="m-0 list-none divide-y divide-border p-0">{content.members.map(member => <li key={member.id} className="py-3"><p className="m-0 text-sm font-semibold">{member.name}{member.isLeader || member.id === content.submittedBy ? ' · Team Leader' : ''}</p><p className="mb-0 mt-1 text-sm text-text-secondary">{member.studentId}</p></li>)}</ul></section>
+  </div>;
+}

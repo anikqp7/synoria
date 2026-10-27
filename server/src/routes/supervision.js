@@ -1,0 +1,16 @@
+const validateRequest = require('../middleware/validateRequest');
+const chat = require('../controllers/chatController');
+const router = require('express').Router();
+const controller = require('../controllers/assignmentController');
+router.use(require('../middleware/requireSupervisor'));
+router.get('/', validateRequest, controller.listAssigned);
+router.post('/:id/review', validateRequest, require('../controllers/proposalReviewController').reviewProposal);
+const meetings = require('../controllers/chatMeetingController');
+router.get('/:id/chat/meetings', validateRequest, meetings.read);
+router.post('/:id/chat/meetings', validateRequest, meetings.save);
+router.patch('/:id/chat/meetings/:meetingId', validateRequest, meetings.save);
+router.get('/:id/chat', validateRequest, chat.messages);
+router.post('/:id/chat', validateRequest, chat.send);
+router.post('/:id/chat/read', validateRequest, chat.read);
+router.get('/:id', validateRequest, controller.getAssigned);
+module.exports = router;

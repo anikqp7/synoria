@@ -1,0 +1,30 @@
+{
+  "name": "hackathon",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "nodemon index.js",
+    "dev": "node --watch index.js",
+    "test": "node --test",
+    "seed:demo": "node scripts/seedDemo.js",
+    "db:backup": "node scripts/databaseArchive.js backup",
+    "db:restore": "node scripts/databaseArchive.js restore",
+    "db:verify": "node scripts/databaseArchive.js verify"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "connect-mongo": "^6.0.0",
+    "dotenv": "^18.0.8",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.1",
+    "express-session": "^1.19.0",
+    "mongoose": "^9.11.2",
+    "nodemon": "^3.1.14",
+    "zod": "^4.6.7"
+  }
+}

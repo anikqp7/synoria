@@ -1,0 +1,7 @@
+"use client";
+import Link from 'next/link';
+import { categoryLabels } from '@/lib/notificationEvents';
+import { dateFor } from '@/lib/monitoringFormat';
+export default function NotificationItem({ item, onRead, compact = false, onNavigate }) {
+  return <li className={`border-b border-border last:border-b-0 ${item.readAt ? '' : 'bg-primary-soft/50'}`}><div className={compact ? 'px-4 py-3' : 'px-5 py-4'}><Link href={item.href} onClick={() => { if (!item.readAt) onRead(item.id); onNavigate?.(); }} className="block rounded-control focus-visible:outline-2 focus-visible:outline-primary"><div className="flex items-start gap-2"><span className={`mt-1.5 size-2 shrink-0 rounded-full ${item.readAt ? 'bg-transparent' : 'bg-primary'}`} aria-label={item.readAt ? 'Read' : 'Unread'} /><div className="min-w-0"><p className="m-0 text-sm font-semibold text-foreground [overflow-wrap:anywhere]">{item.title}</p><p className="mb-0 mt-1 text-sm leading-relaxed text-text-secondary [overflow-wrap:anywhere]">{item.message}</p><p className="mb-0 mt-2 text-[13px] text-text-muted">{categoryLabels[item.category] || 'Update'} · {dateFor(item.createdAt)}</p></div></div></Link>{!compact && !item.readAt && <div className="mt-2 flex justify-end"><button type="button" onClick={() => onRead(item.id)} className="rounded-control px-2 py-1 text-sm font-semibold text-primary hover:bg-primary-soft">Mark As Read</button></div>}</div></li>;
+}

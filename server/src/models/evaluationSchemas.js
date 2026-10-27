@@ -1,0 +1,14 @@
+const { Schema } = require('mongoose');
+const person = new Schema({ id: Schema.Types.ObjectId, name: String, role: String }, { _id: false });
+const criterion = new Schema({ title: String, description: String, maxMarks: Number, weight: Number });
+const rubricSchema = new Schema({ version: Number, name: String, description: String, criteria: [criterion], createdBy: person, createdAt: Date, requestKey: String, fingerprint: String });
+const rubricSnapshot = new Schema({ id: Schema.Types.ObjectId, version: Number, name: String, description: String, criteria: [criterion] }, { _id: false });
+const score = new Schema({ criterionId: Schema.Types.ObjectId, marks: { type: Number, default: null }, comment: String }, { _id: false });
+const version = new Schema({ revision: Number, status: String, scores: [score], comment: String, actor: person, type: String, reason: String, createdAt: Date });
+const record = new Schema({ examiner: person, revision: Number, status: { type: String, enum: ['draft', 'submitted'] }, scores: [score], comment: String, submittedAt: Date, updatedAt: Date, versions: [version] });
+const event = new Schema({ type: String, actor: person, examinerId: Schema.Types.ObjectId, reason: String, createdAt: Date, requestKey: String, fingerprint: String });
+const resultCriterion = new Schema({ criterionId: Schema.Types.ObjectId, title: String, maxMarks: Number, weight: Number, averageMarks: Number, weightedMarks: Number }, { _id: false });
+const boardResult = new Schema({ examiner: person, scores: [score], comment: String, weightedTotal: Number, rawTotal: Number, submittedAt: Date }, { _id: false });
+const publication = new Schema({ rubric: rubricSnapshot, criteria: [resultCriterion], evaluations: [boardResult], letterGrade:String,gradePoint:Number,weightedTotal: Number, rawTotal: Number, rawMaximum: Number, boardCount: Number, note: String, publishedBy: person, publishedAt: Date }, { _id: false });
+const evaluationSchema = new Schema({ revision: { type: Number, default: 0 }, rubric: rubricSnapshot, records: [record], history: [event], publicationVersions:{type:[Schema.Types.Mixed],default:[]}, publication: { type: publication, default: null } }, { _id: false });
+module.exports = { rubricSchema, evaluationSchema };

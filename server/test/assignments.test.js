@@ -1,0 +1,125 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const { once } = require('node:events');
+const { randomBytes } = require('node:crypto');
+require('dotenv').config({ path: require('node:path').join(__dirname, '../.env'), quiet: true });
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+
+test('atomic supervisor capacity, reassignment history and assigned-only access', { timeout: 60000 }, async () => {
+  process.env.SESSION_SECRET = randomBytes(48).toString('hex');
+  let app, server;
+  try {
+    await mongoose.connect(process.env.MONGODB_URI, { dbName: `synoria_assignment_${randomBytes(8).toString('hex')}`, serverSelectionTimeoutMS: 5000 });
+    const Department = require('../src/models/department');
+    const Student = require('../src/models/student');
+    const Workspace = require('../src/models/workspace');
+    const Supervisor = require('../src/models/supervisor');
+    const Ledger = require('../src/models/supervisionLedger');
+    const Examiner = require('../src/models/examiner');
+    await Promise.all([Department, Student, Workspace, Supervisor, Ledger, Examiner].map(Model => Model.init()));
+    const password = 'assignment-password-123', passwordHash = await bcrypt.hash(password, 12);
+    const departments = await Department.create(['CSE', 'EEE'].map(name => ({ proposalPeriod: { status: 'open', deadline: new Date(Date.now()+86400000) }, name, university: 'Test University', email: `${name}@example.edu`, passwordHash })));
+    const students = await Student.create(Array.from({ length: 7 }, (_, i) => ({ department: departments[i === 6 ? 1 : 0]._id, name: `Student ${i}`, email: `student${i}@example.edu`, phone: '+8801712345678', studentId: `ID-${i}`, passwordHash })));
+    const supervisors = await Supervisor.create(Array.from({ length: 4 }, (_, i) => ({ department: departments[i === 3 ? 1 : 0]._id, name: `Supervisor ${i}`, email: `supervisor${i}@example.edu`, phone: '+8801712345678', passwordHash })));
+    const examiner = await Examiner.create({ department: departments[0]._id, name: 'Examiner', email: 'examiner@example.edu', phone: '+8801712345678', passwordHash });
+    const workspaces = await Workspace.create(students.map((student, i) => ({ name: `Team ${i}`, workType: 'project', department: student.department, leader: student._id, members: [student._id], status: i === 5 ? 'draft' : 'submitted', proposalVersions: i === 5 ? [] : [{ version: 1, title: `Proposal ${i}`, abstract: 'Test abstract', researchArea: 'Software', supervisorPreference: { id: supervisors[0]._id, name: supervisors[0].name }, members: [{ id: student._id, name: student.name, studentId: student.studentId }], submittedBy: student._id, submittedAt: new Date() }] })));
+    app = require('../src'); server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
+    const base = `http://127.0.0.1:${server.address().port}/api/auth`;
+    const request = (path, body, cookie, method) => fetch(`${base}/${path}`, { method: method || (body ? 'POST' : 'GET'), headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) }, body: body ? JSON.stringify(body) : undefined });
+    const login = async (account, role) => { const response = await request('login', { email: account.email, password, role }); assert.equal(response.status, 200); return response.headers.get('set-cookie').split(';')[0]; };
+    const admin = await login(departments[0], 'department'), other = await login(departments[1], 'department');
+    const studentCookie = await login(students[0], 'student'), examinerCookie = await login(examiner, 'examiner');
+    const supervisorCookies = []; for (const account of supervisors) supervisorCookies.push(await login(account, 'supervisor'));
+    const assignmentPath = i => `proposals/${workspaces[i].id}/assignment`;
+    const capacity = (i, maxLoad, cookie = admin) => request(`supervisorLoads/${supervisors[i].id}`, { maxLoad }, cookie, 'PATCH');
+    const assign = (i, target, previous = null, cookie = admin) => request(assignmentPath(i), { supervisorId: target === null ? null : supervisors[target].id, expectedSupervisorId: previous === null ? null : supervisors[previous].id, reason: 'Coordinator allocation' }, cookie, 'PUT');
+    const loads = async () => (await (await request('supervisorLoads', null, admin)).json()).supervisors;
+    assert.equal((await request('supervisorLoads')).status, 401);
+    assert.equal((await request('supervision')).status, 401);
+    for (const cookie of [studentCookie, examinerCookie, supervisorCookies[0]]) {
+      assert.equal((await request('supervisorLoads', null, cookie)).status, 403);
+      assert.equal((await assign(0, 0, null, cookie)).status, 403);
+      assert.equal((await capacity(0, 1, cookie)).status, 403);
+    }
+    assert.equal((await request('supervision', null, admin)).status, 403);
+    assert.equal((await capacity(3, 1)).status, 404);
+    assert.equal((await capacity(0, 1, other)).status, 404);
+    assert.equal((await assign(6, 0)).status, 404);
+    assert.equal((await assign(0, 3)).status, 404);
+    assert.equal((await assign(5, 0)).status, 404);
+    assert.equal((await capacity(0, -1)).status, 400);
+    assert.equal((await capacity(0, 1.5)).status, 400);
+    assert.equal((await capacity(0, '1')).status, 400);
+    assert.equal((await loads())[0].maxLoad, 5);
+    for (let i = 0; i < 3; i++) assert.equal((await capacity(i, 1)).status, 200);
+    const race = await Promise.all([assign(0, 0), assign(1, 0)]);
+    assert.deepEqual(race.map(response => response.status).sort(), [200, 409]);
+    const winner = race[0].status === 200 ? 0 : 1, loser = winner === 0 ? 1 : 0;
+    assert.equal((await loads()).find(item => item.id === supervisors[0].id).currentLoad, 1);
+    assert.equal((await capacity(0, 0)).status, 409);
+    assert.equal((await assign(winner, 1, null)).status, 409);
+    assert.equal((await assign(loser, 1)).status, 200);
+    // Failed reassignment to a full supervisor preserves the previous assignment and history.
+    assert.equal((await assign(winner, 1, 0)).status, 409);
+    let context = await (await request(assignmentPath(winner), null, admin)).json();
+    assert.equal(context.assignment.supervisor.id, supervisors[0].id); assert.equal(context.history.length, 1);
+    assert.equal((await request(`supervision/${workspaces[winner].id}`, null, supervisorCookies[0])).status, 200);
+    assert.equal((await request(`supervision/${workspaces[winner].id}`, null, supervisorCookies[1])).status, 404);
+    assert.equal((await request(`supervision/${workspaces[6].id}`, null, supervisorCookies[0])).status, 404);
+    const expectedSnapshot = (await Workspace.findById(workspaces[winner].id)).proposalVersions.toObject();
+    assert.equal((await assign(winner, 2, 0)).status, 200);
+    assert.equal((await request(`supervision/${workspaces[winner].id}`, null, supervisorCookies[0])).status, 404);
+    assert.equal((await request(`supervision/${workspaces[winner].id}`, null, supervisorCookies[2])).status, 200);
+    let items = await loads(); assert.equal(items.find(item => item.id === supervisors[0].id).currentLoad, 0); assert.equal(items.find(item => item.id === supervisors[2].id).currentLoad, 1);
+    context = await (await request(assignmentPath(winner), null, admin)).json();
+    assert.equal(context.history.length, 2); assert.equal(context.history[1].from.id, supervisors[0].id); assert.equal(context.history[1].to.id, supervisors[2].id);
+    assert.deepEqual((await Workspace.findById(workspaces[winner].id)).proposalVersions.toObject(), expectedSnapshot);
+    assert.equal((await assign(winner, null, 2)).status, 200);
+    assert.equal((await loads()).find(item => item.id === supervisors[2].id).currentLoad, 0);
+    assert.equal((await request(`supervision/${workspaces[winner].id}`, null, supervisorCookies[2])).status, 404);
+    // Lowering capacity and taking its last slot are serialized together.
+    const capacityRace = await Promise.all([capacity(0, 0), assign(2, 0)]);
+    assert.equal(capacityRace.filter(response => response.status === 200).length, 1);
+    assert.equal(capacityRace.filter(response => response.status === 409).length, 1);
+    items = await loads(); assert.ok(items.every(item => item.currentLoad <= item.maxLoad));
+    assert.equal((await capacity(0, 3)).status, 200); assert.equal((await capacity(2, 3)).status, 200);
+    assert.equal((await assign(winner, 0)).status, 200);
+    const reassignRace = await Promise.all([assign(winner, 2, 0), assign(winner, null, 0)]);
+    assert.deepEqual(reassignRace.map(response => response.status).sort(), [200, 409]);
+    context = await (await request(assignmentPath(winner), null, admin)).json(); assert.equal(context.history.length, 5);
+    // Archiving releases the occupied slot without deleting assignment history.
+    await Workspace.updateOne({ _id: workspaces[loser]._id }, { $set: { status: 'archived', isActive: false } });
+    assert.equal((await loads()).find(item => item.id === supervisors[1].id).currentLoad, 0);
+    assert.equal((await capacity(1, 0)).status, 200);
+    assert.equal((await request(`supervision/${workspaces[loser].id}`, null, supervisorCookies[1])).status, 404);
+    assert.equal((await assign(loser, 0, 1)).status, 409);
+    await Supervisor.updateOne({ _id: supervisors[2]._id }, { $set: { isActive: false }, $inc: { authVersion: 1 } });
+    assert.equal((await assign(3, 2)).status, 404);
+    assert.equal((await request('supervision', null, supervisorCookies[2])).status, 401);
+    // Departments can set free places directly without replacing occupied slots.
+    const availablePath = `supervisorLoads/${supervisors[0].id}`;
+    const beforePlaces = (await loads()).find(item => item.id === supervisors[0].id);
+    assert.equal((await request(availablePath, { available: 3 }, admin, 'PATCH')).status, 200);
+    let places = (await loads()).find(item => item.id === supervisors[0].id);
+    assert.equal(places.currentLoad, beforePlaces.currentLoad);
+    assert.equal(places.available, 3); assert.equal(places.maxLoad, places.currentLoad + 3);
+    assert.equal((await request(availablePath, { available: 2 }, admin, 'PATCH')).status, 200);
+    places = (await loads()).find(item => item.id === supervisors[0].id);
+    assert.equal(places.available, 2); assert.equal(places.maxLoad, places.currentLoad + 2);
+    assert.equal((await request(availablePath, { available: 0 }, admin, 'PATCH')).status, 200);
+    places = (await loads()).find(item => item.id === supervisors[0].id);
+    assert.equal(places.available, 0); assert.equal(places.maxLoad, places.currentLoad);
+    for (const available of [-1, 1.5, '3', 1001]) assert.equal((await request(availablePath, { available }, admin, 'PATCH')).status, 400);
+    assert.equal((await request(availablePath, { available: 2, maxLoad: 4 }, admin, 'PATCH')).status, 400);
+    for (const cookie of [studentCookie, examinerCookie, supervisorCookies[0]]) assert.equal((await request(availablePath, { available: 2 }, cookie, 'PATCH')).status, 403);
+    assert.equal((await request(availablePath, { available: 2 }, other, 'PATCH')).status, 404);
+    const ledger = await Ledger.findById(departments[0]._id);
+    assert.equal(ledger.assignments.filter(item => String(item.workspace) === workspaces[winner].id).length, context.assignment ? 1 : 0);
+  } finally {
+    if (server) await new Promise(resolve => server.close(resolve));
+    if (mongoose.connection.readyState === 1) await mongoose.connection.dropDatabase();
+    if (app?.locals.sessionStore) await app.locals.sessionStore.close();
+    await mongoose.disconnect();
+  }
+});
